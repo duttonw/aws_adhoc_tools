@@ -89,45 +89,36 @@ def update_spf_txt_record(zone_id, record_name, new_spf_record):
     try:
         records = route53_client.list_resource_record_sets(HostedZoneId=zone_id)
 
-        #count TXT records
         txt_records = [r for r in records['ResourceRecordSets']
                        if r['Name'] == f"{record_name}." and r['Type'] == 'TXT']
 
-        # Filter for SPF TXT records
-        spf_record_count = sum(
-            sum(1 for value in r['ResourceRecords'] if value['Value'].startswith("v=spf1"))
-            for r in
-            filter(lambda r: r['Name'] == f"{record_name}." and r['Type'] == 'TXT', records['ResourceRecordSets'])
-        )
-        print(f"spf_cound:{spf_record_count} txt:{txt_records}")
+        print(f"txt_records: {txt_records}")
 
         # Modify the record
         if len(txt_records) >= 1:
+            count = 0
 
-            if spf_record_count > 1:
-                print("Warning: Multiple SPF records found. This is typically a misconfiguration. Please fix manually")
-            elif spf_record_count >= 1:
-            # Assuming we choose the first DMARC record to update
-                existing_record = txt_records[0]
-                if any(value['Value'].strip('"') == new_spf_record for value in existing_record['ResourceRecords']):
-                    print("Existing SPF record matches the new record.")
-
-                else:
-                    # update SPF record if not the same
-                    for r in records['ResourceRecordSets']:
-                        if r['Name'] == f"{record_name}." and r['Type'] == 'TXT':
-                            for value in r['ResourceRecords']:
-                                if value['Value'].startswith("v=spf1"):
-                                    value['Value'] = f'"{new_spf_record}"'
-                                    route53_updateCommand(zone_id, r)
-            #Append additional spf record
-            else:
-                for r in records['ResourceRecordSets']:
-                    if r['Name'] == f"{record_name}." and r['Type'] == 'TXT':
+            # update SPF record if not the same
+            for r in records['ResourceRecordSets']:
+                if r['Name'] == f"{record_name}." and r['Type'] == 'TXT':
+                    for value in r['ResourceRecords']:
+                        if value['Value'].startswith("v=spf1"):
+                            count = count + 1
+                    # Append additional spf record
+                    if count == 0:
                         r['ResourceRecords'].append(
                             {"Value": f'"{new_spf_record}"'}
                         )
                         route53_updateCommand(zone_id, r)
+                    if count > 1:
+                        print(f"Error: {record_name} has multiple spf records. Please manually fix!!")
+                        break
+                    for value in r['ResourceRecords']:
+                        if value['Value'] == new_spf_record:
+                            print("Existing SPF record matches the new record.")
+                        elif value['Value'].startswith("v=spf1"):
+                            value['Value'] = f'"{new_spf_record}"'
+                            route53_updateCommand(zone_id, r)
 
         else:
             # Not TXT records exist, so add new record
@@ -145,7 +136,6 @@ def update_spf_txt_record(zone_id, record_name, new_spf_record):
 
     except botocore.exceptions.ClientError as error:
         print(f"An error occurred: {error}")
-
 
 def route53_updateCommand(zone_id, record):
     print(f"Update zoneid {zone_id}, changebatch: {record}")
@@ -169,7 +159,7 @@ def update_dmarc_txt_record(zone_id, record_name, new_dmarc_record):
         dmarc_records = [r for r in records['ResourceRecordSets']
                          if r['Name'] == f"_dmarc.{record_name}." and r['Type'] == 'TXT'
                          and any("v=DMARC1" in value['Value'] for value in r['ResourceRecords'])]
-
+        print(f"dmarc_records: {dmarc_records}")
         if dmarc_records:
             if len(dmarc_records) > 1:
                 print("{record_name} Warning: Multiple DMARC records found. This is typically a misconfiguration. Please fix Manually")
