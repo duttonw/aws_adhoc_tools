@@ -8,8 +8,25 @@ import boto3
 import botocore
 from string import whitespace
 
-
 dryrun = True
+
+
+def getRoute53Zones():
+    zones = []
+    starting_token = None
+    while True:
+        cmd = "aws route53 list-hosted-zones --max-items 100"
+        if starting_token:
+            cmd += f" --starting-token {starting_token}"
+        result = subprocess.check_output(cmd, shell=True)
+        data = json.loads(result)
+        zones.extend(data.get('HostedZones', []))
+
+        starting_token = data.get('NextToken')
+        if not starting_token:
+            break
+    return zones
+
 
 def get_resource_record_sets(zone_id):
     record_sets = []
@@ -31,20 +48,9 @@ def get_resource_record_sets(zone_id):
 
     return record_sets
 
-def list_domains_with_records():
-    zones = []
-    starting_token = None
-    while True:
-        cmd = "aws route53 list-hosted-zones --max-items 100"
-        if starting_token:
-            cmd += f" --starting-token {starting_token}"
-        result = subprocess.check_output(cmd, shell=True)
-        data = json.loads(result)
-        zones.extend(data.get('HostedZones', []))
 
-        starting_token = data.get('NextToken')
-        if not starting_token:
-            break
+def list_domains_with_records_and_save_to_disk():
+    zones = getRoute53Zones()
 
     for zone in zones:
         zone_id = zone['Id'].split('/')[-1]
@@ -62,30 +68,35 @@ def list_domains_with_records():
         print(f"Exported: {filename}")
 
 
-def compare_delta():
+def compare_file_to_route53(filename):
+    with open(filename, 'r') as file:
+        saved_zone_data = json.load(file)
+    saved_zone_id = saved_zone_data['HostedZone']['Id'].split('/')[-1]
+    current_record_sets = get_resource_record_sets(saved_zone_id)
+    current_zone_data = {
+        'HostedZone': saved_zone_data['HostedZone'],  # Assuming HostedZone data remains constant
+        'ResourceRecordSets': current_record_sets
+    }
+    saved_str = json.dumps(saved_zone_data, indent=4)
+    current_str = json.dumps(current_zone_data, indent=4)
+    if saved_str != current_str:
+        print(f"Differences found in {filename}:")
+        for line in difflib.unified_diff(saved_str.splitlines(), current_str.splitlines(), lineterm='',
+                                         fromfile='saved', tofile='current'):
+            print(line)
+    else:
+        print(f"No differences in {filename}")
+
+
+def compare_delta(zone_id=None):
+
     for filename in os.listdir('.'):
         if filename.endswith('_records.json'):
-            with open(filename, 'r') as file:
-                saved_zone_data = json.load(file)
-
-            saved_zone_id = saved_zone_data['HostedZone']['Id'].split('/')[-1]
-            current_record_sets = get_resource_record_sets(saved_zone_id)
-
-            current_zone_data = {
-                'HostedZone': saved_zone_data['HostedZone'],  # Assuming HostedZone data remains constant
-                'ResourceRecordSets': current_record_sets
-            }
-
-            saved_str = json.dumps(saved_zone_data, indent=4)
-            current_str = json.dumps(current_zone_data, indent=4)
-
-            if saved_str != current_str:
-                print(f"Differences found in {filename}:")
-                for line in difflib.unified_diff(saved_str.splitlines(), current_str.splitlines(), lineterm='', fromfile='saved', tofile='current'):
-                    print(line)
+            if zone_id:
+                if filename.startswith(zone_id):
+                    compare_file_to_route53(filename)
             else:
-                print(f"No differences in {filename}")
-
+                compare_file_to_route53(filename)
 
 def route53_updateCommand(zone_id, record):
     #print(f"Update zoneid {zone_id}, changebatch: {record}")
@@ -201,22 +212,27 @@ def update_dmarc_txt_record(zone_id, record_name, new_dmarc_record):
         print(f"An error occurred: {error}")
 
 def csv_update(file_name):
+    zones = getRoute53Zones()
     with open(file_name, newline='') as csvfile:
         reader = csv.DictReader(csvfile)
         for row in reader:
-            hosted_zone_id = get_resource_record_sets(row['hostedzoneid'])
-            if not hosted_zone_id:
-                print(f"Hosted zone not found for {row['hostedzoneid']}")
-                continue
-            print(f"updating: {row['hostedzoneid']}, {row['domain']}") #, \"{row['spf_value']}\", \"{row['dmarc_txt']}\"")
-            update_spf_txt_record(row['hostedzoneid'], row['domain'], row['spf_value'])
-            update_dmarc_txt_record(row['hostedzoneid'], row['domain'], row['dmarc_txt'])
+            if not any(record['Id'] == f"/hostedzone/{row['hostedzoneid']}" for record in zones):
+                print(f"id:{row['hostedzoneid']}, domain:{row['domain']} does not exist in this account, skipping")
+            else:
+                hosted_zone_id = get_resource_record_sets(row['hostedzoneid'])
+                if not hosted_zone_id:
+                    print(f"Hosted zone not found for {row['hostedzoneid']}")
+                    continue
+                print(f"updating: {row['hostedzoneid']}, {row['domain']}") #, \"{row['spf_value']}\", \"{row['dmarc_txt']}\"")
+                update_spf_txt_record(row['hostedzoneid'], row['domain'], row['spf_value'])
+                update_dmarc_txt_record(row['hostedzoneid'], row['domain'], row['dmarc_txt'])
 
 def main():
     parser = argparse.ArgumentParser(description='Route53 Domain Operations with Records')
     parser.add_argument('--commit', action='store_true', help='If set will action changes')
     parser.add_argument('--list', action='store_true', help='List and export domains with records to JSON files')
     parser.add_argument('--compare', action='store_true', help='Compare saved domain files with current state in Route53')
+    parser.add_argument('--zoneid',  help='Compare save zoneid domain file with current state in Route53')
     parser.add_argument('--csv', action='store_true', help='Use csv file to update dmarc, spf records in Route53')
     parser.add_argument('--file', help='the csv file, required headers are, hostedzoneid, domain, spf_value, dmarc_txt')
     args = parser.parse_args()
@@ -226,7 +242,9 @@ def main():
         dryrun = False
 
     if args.list:
-        list_domains_with_records()
+        list_domains_with_records_and_save_to_disk()
+    elif args.compare and args.zoneid:
+        compare_delta(args.zoneid)
     elif args.compare:
         compare_delta()
     elif args.csv and args.file is not None:
